@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Link } from 'react-router';
+import { Link } from 'react-router-dom';
 import { connect } from 'react-redux';
 import { ApplicationState } from '../store';
 import { Navbar, Nav, NavItem, NavDropdown, MenuItem } from 'react-bootstrap';
@@ -12,7 +12,7 @@ interface NavMenuProps {
     roles: string[];
 }
 
-class NavMenu extends React.Component<NavMenuProps, void> {
+class NavMenu extends React.Component<NavMenuProps> {
     public render() {
         return <Navbar fixedTop={true}>
             <Navbar.Header>
@@ -51,6 +51,6 @@ class NavMenu extends React.Component<NavMenuProps, void> {
 }
 
 export default connect(
-    (state: ApplicationState) => { return { isAuthenticated: state.login.authenticated, roles: [] }; }, // Selects which state properties are merged into the component's props
+    (state: ApplicationState) => { return { isAuthenticated: state.login.loggedin, roles: [] }; }, // Selects which state properties are merged into the component's props
     {}                 // Selects which action creators are merged into the component's props
 )(NavMenu);

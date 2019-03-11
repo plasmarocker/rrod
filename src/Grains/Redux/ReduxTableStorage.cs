@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using GrainInterfaces;
 using Microsoft.Extensions.DependencyModel;
 using Microsoft.DotNet.PlatformAbstractions;
+using Microsoft.Extensions.Logging;
 
 namespace Grains.Redux
 {
@@ -55,7 +56,7 @@ namespace Grains.Redux
             this.storageConnectionString = storageConnectionString;
         }
 
-        public async Task Initialize(Logger logger)
+        public async Task Initialize(ILogger logger)
         {
             if (table == null)
             {
@@ -70,7 +71,15 @@ namespace Grains.Redux
                         // var storageAccount = CloudStorageAccount.DevelopmentStorageAccount;
                         var tableClient = storageAccount.CreateCloudTableClient();
                         table = tableClient.GetTableReference(tableName);
-                        await table.CreateIfNotExistsAsync();
+                        try
+                        {
+                            await table.CreateIfNotExistsAsync();
+                        }
+                        catch (Exception e)
+                        {
+                            table = null;
+                            throw new Exception("Error creating storage table: " + e.Message);
+                        }
 
                         try
                         {
@@ -86,7 +95,7 @@ namespace Grains.Redux
                                     }
                                     catch(Exception e)
                                     {
-                                        if (logger != null) logger.Log(1004, Severity.Warning, $"Warn: error loading assembly '{name}'",null, e);
+                                        if (logger != null) logger.LogWarning(1004, $"Warn: error loading assembly '{name}'",null, e);
                                         return null;
                                     }
                                 })
@@ -99,7 +108,7 @@ namespace Grains.Redux
                                     }
                                     catch (Exception e)
                                     {
-                                        if (logger != null) logger.Log(1004, Severity.Warning, $"Warn: error getting types from assembly '{a.FullName}'", null, e);
+                                        if (logger != null) logger.LogWarning(1004, $"Warn: error getting types from assembly '{a.FullName}'", null, e);
                                         return Enumerable.Empty<Type>();
                                     }
 
@@ -112,7 +121,7 @@ namespace Grains.Redux
 
                             actionTypeLookup = actionTypes.ToDictionary(t => t.Name).ToImmutableDictionary();
                         }
-                        catch (Exception e)
+                        catch (Exception)
                         {
                             throw new Exception("Reflection failed! ");
                         }
@@ -127,8 +136,8 @@ namespace Grains.Redux
                 }
                 catch (Exception e)
                 {
-                    logger.Error(104, e.Message, e);
-                    throw;
+                    logger.LogError(104, e.Message, e);
+                    throw new Exception($"{e.GetType().ToString()}: {e.Message}"); // StorageException may not be serializable
                 }
                 finally
                 {
@@ -145,7 +154,7 @@ namespace Grains.Redux
         }
 
 
-        public async Task WriteAsync(string partitionKey, IEnumerable<TableStorableAction> actionList, Logger logger)
+        public async Task WriteAsync(string partitionKey, IEnumerable<TableStorableAction> actionList, ILogger logger)
         {
             if (actionList == null)
                 throw new ArgumentException("actionList");
@@ -169,8 +178,7 @@ namespace Grains.Redux
                 count++;
             }
 
-            if (logger.IsVerbose3)
-                logger.Verbose3("Writing {0} actions to table={1}, partition={2}", count, tableName, partitionKey);
+            logger.LogTrace("Writing {0} actions to table={1}, partition={2}", count, tableName, partitionKey);
 
             try
             {
@@ -180,12 +188,12 @@ namespace Grains.Redux
             catch (Exception e)
             {
                 string error = string.Format("Error saving actions: {0}, Message: {1}. Table={2}, Partition={3}", e.GetType().Name, e.Message, tableName, partitionKey);
-                logger.Error(101, error);
-                throw;
+                logger.LogError(101, error);
+                throw new Exception($"{e.GetType().ToString()}: {e.Message}"); // StorageException may not be serializable
             }
         }
 
-        public async Task DeleteAllAsync(string partitionKey, Logger logger)
+        public async Task DeleteAllAsync(string partitionKey, ILogger logger)
         {
             try
             {
@@ -208,15 +216,15 @@ namespace Grains.Redux
             }
             catch (Exception e)
             {
-                logger.Error(101, string.Format("Error deleting partition {0} from Table {1}. Exception {2}, Message: '{3}'", partitionKey, this.tableName, e.GetType().Name, e.Message));
-                throw;
+                logger.LogError(101, string.Format("Error deleting partition {0} from Table {1}. Exception {2}, Message: '{3}'", partitionKey, this.tableName, e.GetType().Name, e.Message));
+                throw new Exception($"{e.GetType().ToString()}: {e.Message}"); // StorageException may not be serializable
             }
         }
 
 
 
 
-        public IObservable<TableStorableAction> ReadObservable(string partitionKey, Logger logger)
+        public IObservable<TableStorableAction> ReadObservable(string partitionKey, ILogger logger)
         {
             var obs = Observable.Create<TableStorableAction>(async (observer, ct) =>
             {
@@ -245,18 +253,18 @@ namespace Grains.Redux
                             }
                             else
                             {
-                                logger.Error(103, String.Format("Error replaying actions: stored action type does not exist (anymore)!: Table={0}, PartitionKey={1}, Action Type={2}",
+                                logger.LogError(103, String.Format("Error replaying actions: stored action type does not exist (anymore)!: Table={0}, PartitionKey={1}, Action Type={2}",
                                 tableName, partitionKey, item.Type));
                             }
                         }
                     }
-                    catch (Exception exc)
+                    catch (Exception e)
                     {
-                        logger.Error(103, String.Format("Exception reading actions: Table={0}, PartitionKey={1}, Exception={2}: {3}",
-                                tableName, partitionKey, exc.GetType().Name, exc.Message), exc);
+                        logger.LogError(103, String.Format("Exception reading actions: Table={0}, PartitionKey={1}, Exception={2}: {3}",
+                                tableName, partitionKey, e.GetType().Name, e.Message), e);
                         // no exception handling required.  If this method throws,
                         // Rx will catch it and call observer.OnError() for us.
-                        throw;
+                        throw new Exception($"{e.GetType().ToString()}: {e.Message}"); // StorageException may not be serializable
                     }
                 }
                 while (token != null);
@@ -265,7 +273,7 @@ namespace Grains.Redux
             return obs;
         }
 
-        public async Task<IEnumerable<TableStorableAction>> ReadAsync(string partitionKey, Logger logger) 
+        public async Task<IEnumerable<TableStorableAction>> ReadAsync(string partitionKey, ILogger logger) 
         {
             if (table == null)
                 await Initialize(logger); // throw new ArgumentException("Table not initialized");
@@ -297,7 +305,7 @@ namespace Grains.Redux
             }
             catch (Exception exc)
             {
-                logger.Error(103, String.Format("Exception reading actions: Table={0}, PartitionKey={1}, Exception={2}",
+                logger.LogError(103, String.Format("Exception reading actions: Table={0}, PartitionKey={1}, Exception={2}",
                         partitionKey, tableName, exc.GetType().Name), exc);
                 // return Enumerable.Empty<TableStorableAction>();
                 throw;
@@ -306,7 +314,7 @@ namespace Grains.Redux
 
         public Task Close()
         {
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
     }
 }

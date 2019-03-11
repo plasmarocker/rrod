@@ -1,81 +1,94 @@
 import * as React from 'react';
-import * as ReactDOM from 'react-dom';
-import { Link } from 'react-router';
 import { connect } from 'react-redux';
-import { autobind } from 'core-decorators';
-import { Grid, Col, Row, Button, Checkbox, Form, FormGroup, FormControl, InputGroup, InputGroupAddon, ControlLabel } from 'react-bootstrap';
-import { ApplicationState } from '../store';
+import { RouteComponentProps, Redirect } from 'react-router-dom';
+import { Grid, Row, Col, Well, Panel, PanelGroup, Button, FormGroup, Form, ControlLabel, FormControl, HelpBlock } from 'react-bootstrap';
+import { ApplicationState } from '../store/index';
 import * as RegisterStore from '../store/Register';
+import Footer from './Footer';
+import { RegisterModel } from '../server/RegisterModel'
 
-type RegisterProps = RegisterStore.RegisterState & typeof RegisterStore.actionCreators;
+type RegisterProps = RegisterStore.RegisterState & typeof RegisterStore.actionCreators & RouteComponentProps<{}>;
 
-interface RegisterState {
-    userName: string;
-    password: string;
+const initialForm: RegisterModel = {
+    email: '',
+    password: '',
+    confirmPassword: ''
 }
 
-class Register extends React.Component<RegisterProps, RegisterState> {
+class Register extends React.Component<RegisterProps, RegisterModel> {
 
-    constructor() {
-        super();
-        this.state = {
-            userName: '',
-            password: ''
-        };
+    constructor(props: RegisterProps) {
+        super(props);
+        this.state = { ...initialForm, ...props.form };
     }
 
-    @autobind
-    handleChange(e: any) {
+
+    componentWillReceiveProps(nextProps: RegisterProps) {
+        if (this.state !== nextProps.form)
+            this.setState(nextProps.form)
+    }
+
+    handleChange = (e: any) => {
         this.setState({ ...this.state, [e.target.name]: e.target.value });
     }
 
-    @autobind
-    private register(event: React.FormEvent<Form>) {
-        this.props.register({ email: this.state.userName, password: this.state.password, confirmPassword: this.state.password });
+    submit = (event: React.FormEvent<Form>) => {
+        this.props.submitRegistrationForm(this.state);
         event.preventDefault();
     }
 
-    @autobind
-    getValidationState(): "success" | "warning" | "error" {
-        return null;
+    render() {
+        if (this.props.result && this.props.result.success) {
+            return <Redirect to="/" />;
+        } else {
+            return this.renderForm();
+        }
     }
 
-    public render() {
-        return <Grid>
-            <h1>Register new account</h1>
-            <hr/>
-            <Form horizontal onSubmit={this.register} autoComplete="on">
-                <FormGroup name="userName" validationState={this.getValidationState()}>
-                    <Col componentClass={ControlLabel} sm={2}>
-                        Email
-                    </Col>
-                    <Col sm={10}>
-                        <FormControl name="userName" type="text" onChange={this.handleChange} placeholder="Email" />
-                        <FormControl.Feedback />
-                    </Col>
-                </FormGroup>
+    renderForm() { // TODO errorhandling
+        return <Grid fluid>
+            <Row>
+                <Grid>
+                    <h1>New user</h1>
+                    <Well bsSize="sm">
+                        <Form horizontal action="/contact" method="post" onSubmit={this.submit}>
+                            <fieldset>
+                                <legend className="text-center header">Register your account</legend>
+                                <FormGroup>
+                                    <Col md={10} mdOffset={1}>
+                                        <FormControl name="email" type="text" onChange={this.handleChange} value={this.state.email} placeholder="email@domain.com" />
+                                    </Col>
+                                </FormGroup>
+                                <FormGroup>
+                                    <Col md={10} mdOffset={1}>
+                                        <FormControl name="password" type="password" onChange={this.handleChange} value={this.state.password} placeholder="Password" />
+                                    </Col>
+                                </FormGroup>
 
-                <FormGroup name="password">
-                    <Col componentClass={ControlLabel} sm={2}>
-                        Password
-                    </Col>
-                    <Col sm={10}>
-                        <FormControl name="password" type="password" onChange={this.handleChange} placeholder="Password" />
-                    </Col>
-                    <FormControl.Feedback />
-                </FormGroup>
+                                <FormGroup>
+                                    <Col md={10} mdOffset={1}>
+                                        <FormControl name="confirmPassword" type="password" onChange={this.handleChange} value={this.state.confirmPassword} placeholder="Confirm password" />
+                                    </Col>
+                                </FormGroup>
 
-                <FormGroup>
-                    <Col smOffset={2} sm={10}>
-                        <Button className="btn btn-primary" type="submit">Register</Button>
-                    </Col>
-                </FormGroup>
-            </Form>
-        </Grid>;
+                                <FormGroup>
+                                    <Col md={11} className="text-center">
+                                        <Button type="submit" bsSize="lg" bsStyle="primary" disabled={this.props.isSubmitting}>{ this.props.isSubmitting ? "Spinner" : "Register" }</Button>
+                                    </Col>
+                                </FormGroup>
+                            </fieldset>
+                        </Form>
+                    </Well>
+                </Grid>
+            </Row>
+            <br />
+            {/* <Row id="footer">
+                <Footer />
+            </Row> */}
+        </Grid>
     }
 }
 
-// Wire up the React component to the Redux store
 export default connect(
     (state: ApplicationState) => state.register, // Selects which state properties are merged into the component's props
     RegisterStore.actionCreators                 // Selects which action creators are merged into the component's props

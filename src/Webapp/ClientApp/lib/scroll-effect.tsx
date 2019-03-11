@@ -1,8 +1,13 @@
 ﻿import * as React from 'react';
 import * as ReactDOM from 'react-dom';
-import classNames from 'classnames';
-import { autobind } from 'core-decorators';
-import { debounce, Cancelable } from 'lodash';
+import * as classNames from 'classnames';
+import debounce from 'lodash-es/debounce';
+import { Element } from 'react-scroll';
+
+interface Cancelable {
+    cancel(): void;
+    flush(): void;
+}
 
 interface ScrollEffectState {
     animated: boolean;
@@ -25,8 +30,8 @@ interface ScrollEffectProps {
 //);
 
 export default class ScrollEffect extends React.Component<ScrollEffectProps, ScrollEffectState> {
-    constructor() {
-        super();
+    constructor(props: ScrollEffectProps) {
+        super(props);
         this.state = {
             animated: false,
         };
@@ -93,10 +98,9 @@ export default class ScrollEffect extends React.Component<ScrollEffectProps, Scr
         }, this.props.duration * 1000 * number);
     }
 
-    @autobind
     handleScroll(e) {
         if (!this.state.animated) {
-            let element = ReactDOM.findDOMNode(this);
+            let element = ReactDOM.findDOMNode(this) as HTMLElement;
             let elementPositionY = element.getBoundingClientRect().top + document.body.scrollTop,
                 scrollPositionY = window.scrollY,
                 windowHeight = window.innerHeight;

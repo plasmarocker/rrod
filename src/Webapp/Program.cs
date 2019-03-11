@@ -1,367 +1,331 @@
-using System;
-using System.IO;
-using System.Threading;
+using GrainInterfaces;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
-using Orleans;
-using Orleans.Runtime;
-using Orleans.Runtime.Configuration;
-using Microsoft.Extensions.Logging;
-using System.Linq;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.AspNetCore.Builder;
-using Webapp.Services;
-using GrainInterfaces;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Orleans;
 using Orleans.Concurrency;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Serialization;
-using Microsoft.AspNetCore.ResponseCompression;
-using System.IO.Compression;
-using Microsoft.AspNetCore.SpaServices.Webpack;
-using Webapp.Controllers;
-using Webapp.Identity;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Orleans.Configuration;
+using Orleans.Hosting;
+using Orleans.Providers.Streams.AzureQueue;
+using Orleans.Runtime;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Net;
+using System.Security.Cryptography.X509Certificates;
+using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.AspNetCore.Mvc.ViewFeatures;
-using Microsoft.AspNetCore.Identity;
-using IdentityModel;
-using System.IdentityModel.Tokens;
-using Microsoft.Extensions.Caching.Distributed;
+using Webapp.Models;
+using Webapp.Services;
 
 namespace Webapp
 {
     public class Program
     {
-        public static IConfigurationRoot Configuration;
-        public static readonly ILoggerFactory loggerFactory = new LoggerFactory();
+        private static readonly ManualResetEvent clientStopped = new ManualResetEvent(false);
 
-        public static void Main(string[] args)
+        public static async Task Main(string[] args)
         {
-            string environment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Development";
-            bool isDevelopment = "Development".Equals(environment, StringComparison.OrdinalIgnoreCase);
+            var environment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Development";
+            var isDevelopment = "Development".Equals(environment, StringComparison.OrdinalIgnoreCase);
 
-            var builder = new ConfigurationBuilder()
+            var config = new ConfigurationBuilder()
                 .SetBasePath(Directory.GetCurrentDirectory())
-                .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
-                .AddJsonFile($"appsettings.{environment}.json", optional: true)
-                .AddEnvironmentVariables();
+                .AddInMemoryCollection(new Dictionary<string, string> // add default settings, that will be overridden by commandline
+                {
+                    {"Id", "Webapp"},
+                    {"Version", "1.0.0"},
+                    {"ClusterId", "rrod-cluster"},
+                    {"ServiceId", "rrod"}
+                })
+                .AddCommandLine(args)
+                .AddJsonFile("Webapp.settings.json", optional: true, reloadOnChange: true)
+                .AddJsonFile($"Webapp.settings.{environment}.json", optional: true, reloadOnChange: true)
+                .AddJsonFile("/run/config/Webapp.settings.json", optional: true, reloadOnChange: true)
+                .AddDockerSecrets("/run/secrets", optional: true)
+                .AddUserSecrets<Program>(optional: true)
+                .AddEnvironmentVariables("RROD_")
+                .Build();
 
-            if (builder.GetFileProvider().GetFileInfo("Webapp.csproj").Exists)
+            var loggerFactory = new LoggerFactory()
+                .AddConsole(config.GetSection("Logging"))
+                .AddDebug();
+            var logger = loggerFactory.CreateLogger<Program>();
+            logger.LogWarning($"Starting Webapp in {environment} environment...");
+
+            foreach (var provider in config.Providers)
             {
-                builder.AddUserSecrets();
+                logger.LogInformation($"Config Provider {provider.GetType().Name}: {provider.GetChildKeys(Enumerable.Empty<string>(), null).Count()} settings");
             }
 
-            Configuration = builder.Build();
+            // ServicePointManager.CheckCertificateRevocationList = false;
+            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls | SecurityProtocolType.Tls11 | SecurityProtocolType.Tls12;
+            ServicePointManager.DefaultConnectionLimit = 20;
 
-            loggerFactory.AddConsole(Configuration.GetSection("Logging"));
-            loggerFactory.AddDebug();
-
-            // Initialize the connection to the OrleansHost process
-            var orleansClientConfig = ClientConfiguration.LocalhostSilo();
-            orleansClientConfig.DeploymentId = Configuration["DeploymentId"];
-            orleansClientConfig.DataConnectionString = Configuration.GetConnectionString("DataConnectionString");
-            orleansClientConfig.AddSimpleMessageStreamProvider("Default");
-            orleansClientConfig.DefaultTraceLevel = Severity.Warning;
-            orleansClientConfig.TraceFileName = "";
-            do
+            int attempt = 0;
+            int initializeAttemptsBeforeFailing = 7;
+            IClusterClient clusterClient = null;
+            while (true)
             {
+                // Initialize orleans client
+                clusterClient = new ClientBuilder()
+                    .ConfigureServices((context, services) =>
+                    {
+                        // services.AddOptions();
+                        services.AddSingleton<ILoggerFactory>(loggerFactory);
+                        // services.AddSingleton<IConfiguration>(config);
+                        services.Configure<ClusterOptions>(config);
+                    })
+                    .AddAzureQueueStreams<AzureQueueDataAdapterV2>("Default", builder => builder.Configure(options => options.ConnectionString = config.GetConnectionString("DataConnectionString")))
+                    .ConfigureApplicationParts(parts =>
+                    {
+                        parts.AddApplicationPart(typeof(ICounterGrain).Assembly).WithReferences();
+                        parts.AddApplicationPart(typeof(AzureQueueDataAdapterV2).Assembly).WithReferences();
+                    })
+                    .UseAzureStorageClustering(options => options.ConnectionString = config.GetConnectionString("DataConnectionString"))
+                    .Build();
+
                 try
                 {
-                    GrainClient.Initialize(orleansClientConfig);
+                    await clusterClient.Connect().ConfigureAwait(false);
+                    logger.LogInformation("Client successfully connected to silo host");
+                    break;
                 }
-                catch (Exception ex) when (ex is OrleansException || ex is SiloUnavailableException)
+                catch (OrleansException)
                 {
-                    // Wait for the Host to start
-                    Thread.Sleep(3000);
+                    attempt++;
+                    logger.LogWarning($"Attempt {attempt} of {initializeAttemptsBeforeFailing} failed to initialize the Orleans client.");
+
+                    if (clusterClient != null)
+                    {
+                        clusterClient.Dispose();
+                        clusterClient = null;
+                    }
+
+                    if (attempt > initializeAttemptsBeforeFailing)
+                    {
+                        throw;
+                    }
+
+                    // Wait 4 seconds before retrying
+                    await Task.Delay(TimeSpan.FromSeconds(4));
                 }
             }
-            while (!GrainClient.IsInitialized);
 
-            // we use a single settings file, that also contains the hosting settings
-            var urls = (Configuration[WebHostDefaults.ServerUrlsKey] ?? "http://localhost:5000")
-                .Split(new[] { ',', ';' })
-                .Select(url => url.Trim())
-                .ToArray();
-
-            // find out if we run any secure urls
-            var secureUrls = urls
-                .Distinct()
-                .Select(url => new Uri(url))
-                .Where(uri => uri.Scheme == "https")
-                .ToArray();
-
-
-            // It is possible to request Acme certificates with subject alternative names, but this is not yet implemented.
-            // Usually we'll need only a single address, so I'm taking the first one
-            // string firstSecureHost = secureUrls.Any() ? secureUrls.First().Host : null;
-            var listenUrls = urls
-                .Distinct()
-                .Where(url => url.StartsWith("http://"));
+            var endpoints = config.GetSection("Http:Endpoints")
+                    .GetChildren()
+                    .ToDictionary(section => section.Key, section =>
+                    {
+                        var endpoint = new EndpointConfiguration();
+                        section.Bind(endpoint);
+                        return endpoint;
+                    });
 
             // if so, start a listener to respond to Acme (Let's Encrypt) requests, using a response received via an Orleans Cache Grain
-            string[] httpsDomains;
-            IWebHost acmeHost;
-            AcmeOptions acmeOptions;
+            var hasHttps = endpoints.Any(endpoint => endpoint.Value.Scheme.Equals("https", StringComparison.InvariantCultureIgnoreCase));
+            var needPort80 = endpoints.Any(endpoint => (endpoint.Value.Port ?? (endpoint.Value.Scheme.Equals("https", StringComparison.InvariantCultureIgnoreCase) ? 443 : 80)) == 80);
+            var certs = new Dictionary<string, X509Certificate2>();
 
-            if (!secureUrls.Any())
+            var acmeOptions = new AcmeOptions
             {
-                httpsDomains = new string[] { };
-                acmeOptions = null;
-                acmeHost = null;
-            }
-            else
-            {
-                // Kestrel can only listen once to any given port, so we make sure multiple https addresses get only one listener
-                var httpsListen = secureUrls.GroupBy(url => url.Port).Select(url => url.First()).Select(url => "https://*:" + url.Port);
-                listenUrls = listenUrls.Union(httpsListen);
-                httpsDomains = secureUrls.Select(url => url.Host).Distinct().ToArray();
-
-                acmeOptions = new AcmeOptions
+                AcmeSettings = config.GetSection(nameof(AcmeSettings)).Get<AcmeSettings>(),
+                GetChallengeResponse = async (challenge) =>
                 {
-                    DomainNames = httpsDomains,
-                    GetChallengeResponse = async (challenge) =>
-                    {
-                        var cacheGrain = GrainClient.GrainFactory.GetGrain<ICacheGrain<string>>(challenge);
-                        var response = await cacheGrain.Get();
-                        return response.Value;
-                    },
-                    SetChallengeResponse = async (challenge, response) =>
-                    {
-                        var cacheGrain = GrainClient.GrainFactory.GetGrain<ICacheGrain<string>>(challenge);
-                        await cacheGrain.Set(new Immutable<string>(response), TimeSpan.FromHours(2));
-                    },
-                    StoreCertificate = async (string domainName, byte[] certData) =>
-                    {
-                        var certGrain = GrainClient.GrainFactory.GetGrain<ICertGrain>(domainName);
-                        await certGrain.UpdateCertificate(certData);
-                    },
-                    RetrieveCertificate = async (domainName) =>
-                    {
-                        var certGrain = GrainClient.GrainFactory.GetGrain<ICertGrain>(domainName);
-                        var certData = await certGrain.GetCertificate();
-                        return certData.Value;
-                    }
-                };
+                    var cacheGrain = clusterClient.GetGrain<ICacheGrain<string>>(challenge);
+                    var response = await cacheGrain.Get();
+                    return response.Value;
+                },
+                SetChallengeResponse = async (challenge, response) =>
+                {
+                    var cacheGrain = clusterClient.GetGrain<ICacheGrain<string>>(challenge);
+                    await cacheGrain.Set(new Immutable<string>(response), TimeSpan.FromHours(2));
+                },
+                StoreCertificate = async (string domainName, byte[] certData) =>
+                {
+                    var certGrain = clusterClient.GetGrain<ICertGrain>(domainName);
+                    await certGrain.UpdateCertificate(certData);
+                },
+                RetrieveCertificate = async (domainName) =>
+                {
+                    var certGrain = clusterClient.GetGrain<ICertGrain>(domainName);
+                    var certData = await certGrain.GetCertificate();
+                    return certData.Value;
+                }
+            };
 
-                acmeHost = new WebHostBuilder()
+            if (hasHttps)
+            {
+                logger.LogWarning($"At least one https endpoint is present. Initialize Acme endpoint.");
+
+                var acmeHost = new WebHostBuilder()
                     .UseEnvironment(environment)
-                    .ConfigureServices(services => {
-                        services.AddSingleton<IConfiguration>(Configuration);
-                        services.Configure<AcmeSettings>(Configuration.GetSection(nameof(AcmeSettings)));
+                    .UseConfiguration(config)
+                    .ConfigureServices(services =>
+                    {
+                        services.AddSingleton<IClusterClient>(clusterClient);
+                        services.AddSingleton<ILoggerFactory>(loggerFactory);
+                        services.Configure<AcmeSettings>(config.GetSection(nameof(AcmeSettings)));
 
                         // Register a certitificate manager, supplying methods to store and retreive certificates and acme challenge responses
                         services.AddAcmeCertificateManager(acmeOptions);
                     })
-                    .UseUrls("http://*:80/.well-known/acme-challenge/")
-                    .UseKestrel()
-                    .UseLoggerFactory(loggerFactory)
-                    .Configure(app => {
+                    // .UseUrls("http://*:80")
+                    .PreferHostingUrls(false)
+                    .UseKestrel(options => {
+                        options.Listen(IPAddress.Any, 80);
+                    })
+                    .Configure(app =>
+                    {
                         app.UseAcmeResponse();
                     })
                     .Build();
 
                 try
                 {
-                    acmeHost.Start();
+                    await acmeHost.StartAsync().ConfigureAwait(false);
                 }
                 catch (Exception e)
                 {
-                    var logger = loggerFactory.CreateLogger<Program>();
                     logger.LogError("Error: can't start web listener for acme certificate renewal, probably the web address is in use by another process. Exception message is: " + e.Message);
                     logger.LogError("Ignoring noncritical error (stop W3SVC or Skype to fix this), continuing...");
                 }
+
+                var certificateManager = acmeHost.Services.GetRequiredService<ICertificateManager>();
+                // var certificateManager = new AcmeCertificateManager(Options.Create(acmeOptions));
+                foreach (var endpoint in endpoints)
+                {
+                    var endpointConfig = endpoint.Value;
+                    bool isHttpsEndpoint = endpointConfig.Scheme.Equals("https", StringComparison.InvariantCultureIgnoreCase);
+                    var port = endpointConfig.Port ?? (isHttpsEndpoint ? 443 : 80);
+
+                    X509Certificate2 certificate = null;
+                    if (isHttpsEndpoint)
+                    {
+                        try
+                        {
+                            var domains = new List<string> { endpointConfig.Domain }
+                                .Concat(endpointConfig.Domains)
+                                .Where(ep => !string.IsNullOrEmpty(ep))
+                                .Distinct()
+                                .ToArray();
+
+                            logger.LogInformation($"Getting certificate for domain {domains.First()} on port {port}");
+
+                            // Request a new certificate with Let's Encrypt and store it for next time
+                            try 
+                            {
+                                certificate = await certificateManager.GetCertificate(domains);
+                            }
+                            catch (Exception e)
+                            {
+                                logger.LogCritical(e, $"Exception getting certificate for domain {domains.First()}. PfxPassword configured incorrectly?");
+                            }
+                            if (certificate == null)
+                            {
+                                // It didn't work - create a temporary certificate so that we can still start with an untrusted certificate
+                                logger.LogCritical($"Error getting certificate for domain {domains.First()} (endpoint '{endpoint.Key}'). Creating self-signed temporary certificate...");
+                                certificate = CertHelper.BuildTlsSelfSignedServer(domains);
+                            }
+                            certs.Add(domains.First(), certificate);
+                            logger.LogInformation($"Certificate for domain {domains.First()}: {certificate != null}");
+                        }
+                        catch (Exception e)
+                        {
+                            logger.LogCritical($"Kestrel startup: Exception getting certificate. {e.Message}");
+                        }
+                    }
+                }
+                if (needPort80)
+                {
+                    await acmeHost.StopAsync();
+                }
             }
 
-            var host = new WebHostBuilder()
-                .UseContentRoot(Directory.GetCurrentDirectory())
+            var webHost = new WebHostBuilder()
                 .UseEnvironment(environment)
-                .UseUrls(listenUrls.ToArray())
-                .UseLoggerFactory(loggerFactory)
+                .UseConfiguration(config)
                 .ConfigureServices(services =>
                 {
-                    services.AddSingleton<IConfiguration>(Configuration);
-                    services.Configure<AcmeSettings>(Configuration.GetSection(nameof(AcmeSettings)));
-
-                    // TODO DotNetCore 2.0 configure the cookie name: https://github.com/aspnet/Mvc/commit/17dc23a024c1219ec58c48199f8d4f23117cf348
-                    // services.Configure<CookieTempDataProviderOptions>(options => options.CookieName = "SESSION");
-
-                    // Register service for session cookie (used in controller)
-                    services.AddSingleton<ITempDataProvider, CookieTempDataProvider>();
-
-                    // Add a basic Orleans-based distributed cache
-                    services.AddOrleansCache();
-                   
-
-                    if (secureUrls.Any())
-                    {
-                        services.AddAcmeCertificateManager(acmeOptions);
-                    }
-                    services.Configure<GzipCompressionProviderOptions>(options => options.Level = CompressionLevel.Fastest);
-                    services.AddResponseCompression(options => {
-                        options.EnableForHttps = true;
-                        options.Providers.Add<GzipCompressionProvider>();
-                    });
-
-                    services.AddAntiforgery(options =>
-                    {
-                        // options.CookieName = "XSRF-TOKEN";
-                        options.HeaderName = "X-XSRF-TOKEN";
-                    });
-
-                    services.AddAuthorization(options =>
-                    {
-                        options.AddPolicy("admin", policy =>
-                        {
-                            policy.RequireClaim(JwtClaimTypes.Role, "admin");
-                        });
-                    });
-
-                    services.AddScoped<IUserClaimsPrincipalFactory<ApplicationUser>, ApplicationUserClaimsPrincipalFactory>();
-
-                    // var jwtAppSettingOptions = Configuration.GetSection(nameof(JwtIssuerOptions));
-                    // Configure JwtIssuerOptions
-                    services.Configure<JwtIssuerOptions>(Configuration.GetSection(nameof(JwtIssuerOptions)));
-
-                    services.AddIdentity<ApplicationUser, UserRole>(options => {
-                        options.Password.RequireDigit = false;
-                        options.Password.RequireLowercase = false;
-                        options.Password.RequireUppercase = false;
-                        options.Password.RequireNonAlphanumeric = false; ;
-                        options.Password.RequiredLength = 5;
-                    })
-                    .AddUserStore<OrleansUserStore>()
-                    .AddRoleStore<OrleansRoleStore>()
-                    .AddUserManager<ApplicationUserManager>()
-                    // .AddIdentityServerUserClaimsPrincipalFactory()
-                    .AddClaimsPrincipalFactory<ApplicationUserClaimsPrincipalFactory>()
-                    .AddDefaultTokenProviders();
-
-                    services.AddTransient<IEmailSender, AuthMessageSender>();
-                    services.AddTransient<ISmsSender, AuthMessageSender>();
-
-                    // IdentityServer Authentication
-                    services.AddIdentityServer()
-                        .AddTemporarySigningCredential()
-                        .AddInMemoryApiResources(Config.GetApiResources())
-                        .AddInMemoryClients(Config.GetClients());
-        
-                    // services.AddWebSocketManager();
-                    
-                    services.AddNodeServices(options => {
-                        if (isDevelopment)
-                        {
-                            options.LaunchWithDebugging = true;
-                            options.DebuggingPort = 5858;
-                        }
-                        options.NodeInstanceOutputLogger = loggerFactory.CreateLogger("Node Console Logger");
-                    });
-                    // Add framework services.
-                    services
-                        .AddMvc()
-                        .AddJsonOptions(options =>
-                        {
-                            options.SerializerSettings.NullValueHandling = NullValueHandling.Ignore;
-                            options.SerializerSettings.ContractResolver = new CamelCasePropertyNamesContractResolver();
-                            options.SerializerSettings.Formatting = Formatting.Indented;
-                            JsonConvert.DefaultSettings = () => new JsonSerializerSettings()
-                            {
-                                ContractResolver = new CamelCasePropertyNamesContractResolver(),
-                                Formatting = Newtonsoft.Json.Formatting.Indented,
-                                NullValueHandling = NullValueHandling.Ignore,
-                            };
-                        });
+                    // services.AddSingleton<IConfiguration>(config);
+                    services.AddSingleton<IClusterClient>(clusterClient);
+                    services.AddSingleton<ILoggerFactory>(loggerFactory);
+                    services.Configure<AcmeSettings>(config.GetSection(nameof(AcmeSettings)));
+                    services.AddAcmeCertificateManager(acmeOptions);
                 })
+                .UseContentRoot(Directory.GetCurrentDirectory())
+                // .UseUrls(listenUrls.ToArray())
+                .PreferHostingUrls(false)
                 .Configure(app =>
                 {
-                    if (isDevelopment)
+                    app.UseAcmeResponse();
+                })
+                .UseStartup<Startup>()
+                .UseKestrel(options =>
+                {
+                    foreach (var endpoint in endpoints)
                     {
-                        app.UseDeveloperExceptionPage();
-                        app.UseWebpackDevMiddleware(new WebpackDevMiddlewareOptions
-                        {
-                            HotModuleReplacement = true,
-                            HotModuleReplacementServerPort = 6000,
-                            ReactHotModuleReplacement = true,
-                        });
-                    }
-                    else
-                    {
-                        app.UseExceptionHandler("/Home/Error");
-                    }
+                        var endpointConfig = endpoint.Value;
+                        bool isHttpsEndpoint = endpointConfig.Scheme.Equals("https", StringComparison.InvariantCultureIgnoreCase);
+                        var port = endpointConfig.Port ?? (isHttpsEndpoint ? 443 : 80);
 
-                    app.UseIdentity();
-                    app.UseIdentityServer();
+                        var ipAddresses = new List<IPAddress>();
+                        var hosts = new List<string> { endpointConfig.Host }
+                            .Concat(endpointConfig.Hosts)
+                            .Where(ep => !string.IsNullOrEmpty(ep))
+                            .Distinct();
 
-                    JwtSecurityTokenHandler.InboundClaimTypeMap.Clear();
-                    app.UseIdentityServerAuthentication(new IdentityServerAuthenticationOptions
-                    {
-                        Authority = urls.First(),
-                        LegacyAudienceValidation = false,
-                        
-                        // AuthenticationScheme = IdentityServerConstants.DefaultCookieAuthenticationScheme,
-                        // SupportedTokens = IdentityServer4.AccessTokenValidation.SupportedTokens.Jwt,
-                        RequireHttpsMetadata = false, // !env.IsDevelopment(),
-                        ApiName = urls.First(),
-                        JwtBearerEvents = new JwtBearerEvents
+                        foreach (var host in hosts)
                         {
-                            OnAuthenticationFailed = async (ctx) => 
+                            if (host == "localhost")
                             {
-                                await Task.FromResult(0);
-                            },
-                            OnChallenge = async (ctx) => 
+                                ipAddresses.Add(IPAddress.IPv6Loopback);
+                                ipAddresses.Add(IPAddress.Loopback);
+                            }
+                            else if (IPAddress.TryParse(host, out var address))
                             {
-                                await Task.FromResult(0);
-                            },
-                            OnMessageReceived = async (ctx) => 
+                                ipAddresses.Add(address);
+                            }
+                            else
                             {
-                                await Task.FromResult(0);
-                            },
-                            OnTokenValidated = async (ctx) => 
-                            {
-                                await Task.FromResult(0);
+                                logger.LogError($"Error parsing endpoint host: {host}");
                             }
                         }
-                    });
 
-                    // if a .gz version of a static file is available (created by webpack), send that one
-                    app.UseCompressedStaticFiles();
-                    app.UseStaticFiles();
-                    app.UseResponseCompression();
-
-                    app.UseWebSockets();
-                    app.Map("/actions", ap => ap.UseMiddleware<WebSocketHandlerMiddleware>(new ActionsHandler()));
-
-                    app.UseMvc(routes =>
-                    {
-                        routes.MapRoute(
-                            name: "default",
-                            template: "{controller=Home}/{action=Index}/{id?}");
-
-                        routes.MapSpaFallbackRoute(
-                            name: "spa-fallback",
-                            defaults: new { controller = "Home", action = "Index" });
-                    });
-                })
-                .UseKestrel(async options => {
-                    // TODO: Make this into a nice Kestrel.Https.Acme nuget package
-                    if (secureUrls.Any())
-                    {
-                        // Request a new certificate with Let's Encrypt and store it for next time
-                        var certificateManager = options.ApplicationServices.GetService<ICertificateManager>();
-                        var certificate = await certificateManager.GetCertificate(httpsDomains);
-                        if (certificate != null)
-                            options.UseHttps(certificate);
-
-                        //if (acmeHost != null)
-                        //{
-                        //    // How to stop the acme listener? Kestrel doesn't support SNI, so we need to stop the acme listener to free up port 80 if we want to bind our regular site to that port too
-                        //    acmeHost.Dispose();
-                        //    acmeHost = null;
-                        //}
+                        foreach (var address in ipAddresses)
+                        {
+                            options.Listen(address, port, listenOptions =>
+                            {
+                                if (isHttpsEndpoint)
+                                {
+                                    var domains = new List<string> { endpointConfig.Domain }
+                                        .Concat(endpointConfig.Domains)
+                                        .Where(ep => !string.IsNullOrEmpty(ep))
+                                        .Distinct()
+                                        .ToArray();
+                                    
+                                    if (certs.TryGetValue(domains.First(), out var certificate))
+                                    {
+                                        logger.LogInformation($"Kestrel config: Listen on address {address.ToString()}:{port}, certificate {(certificate == null ? "NULL" : certificate.Subject.ToString())}");
+                                        listenOptions.UseHttps(certificate);
+                                        listenOptions.NoDelay = false;
+                                        // listenOptions.UseConnectionLogging();
+                                    }
+                                    else
+                                    {
+                                        logger.LogError($"No certificate for domain: {domains.First()}");
+                                    }
+                                }
+                            });
+                        }
                     }
                 })
                 .Build();
 
-            host.Run();
+            await webHost.RunAsync();
         }
     }
 }

@@ -1,60 +1,75 @@
 import * as React from 'react';
 import * as ReactDOM from 'react-dom';
-import { Link } from 'react-router';
+import { Link, RouteComponentProps, Redirect } from 'react-router-dom';
 import { connect } from 'react-redux';
-import { autobind } from 'core-decorators';
-import { Grid, Col, Row, Button, Checkbox, Form, FormGroup, FormControl, InputGroup, InputGroupAddon } from 'react-bootstrap';
-import { ApplicationState } from '../store';
+import { Grid, Col, Row, Button, Checkbox, Form, FormGroup, FormControl, InputGroup, InputGroupAddon, HelpBlock } from 'react-bootstrap';
+import { ApplicationState } from '../store/';
 import * as LoginStore from '../store/Login';
+import { LoginModel } from '../server/LoginModel';
+import { HeadTag } from '../lib/react-head';
 
-type LoginProps = LoginStore.LoginState & typeof LoginStore.actionCreators;
-
-interface LoginState {
-    userName: string;
-    password: string;
+function head() {
+    return <HeadTag key="title" tag="title">RROD - Login</HeadTag>;
 }
 
-class Login extends React.Component<LoginProps, LoginState> {
+type LoginProps = LoginStore.LoginState & typeof LoginStore.actionCreators & RouteComponentProps<{}>;
 
-    constructor() {
-        super();
+class Login extends React.Component<LoginProps, LoginModel> {
+
+    constructor(props) {
+        super(props);
         this.state = {
-            userName: '',
+            email: '',
             password: ''
         };
     }
 
-    @autobind
-    handleChange(e: any) {
+    handleChange(e: React.ChangeEvent<any>) { // should be HTMLInputElement
         this.setState({ ...this.state, [e.target.name]: e.target.value });
     }
 
-    @autobind
     private login(event: React.FormEvent<Form>) {
-        this.props.login({ email: this.state.userName, password: this.state.password, rememberLogin: true, returnUrl: '/' });
+        this.props.login(this.state);
         event.preventDefault();
     }
 
-    @autobind
     getValidationState(): "success" | "warning" | "error" {
         return null;
     }
 
-    public renderLoggedIn() {
-        return <Grid>
-            <h1>U bent ingelogd!</h1>
-
-            <form action="~/account" method="post">
-                <button className="btn btn-lg btn-warning" type="submit">Query the resource controller</button>
-            </form>
-
-            <a className="btn btn-lg btn-danger" href="/signout">Sign out</a>
-        </Grid>
+    queryParam(name: string, location: string): string {
+        var results = new RegExp(`[\?&]${name}=([^&#]*)`).exec(location);
+        if (results == null) {
+            return null;
+        }
+        else {
+            return decodeURIComponent(results[1]) || null;
+        }
     }
 
-    public renderAnonymous() {
+    renderLoggedIn() {
+        var redirect: string;
+        // const query = new URLSearchParams(this.props.location.search);
+        const returnUrl = this.queryParam('returnUrl', this.props.location.search);
+        const isAbsolute = new RegExp('^([a-z]+://|//)', 'i');
+        if (returnUrl && !isAbsolute.test(returnUrl)) {
+            redirect = returnUrl;
+        } else {
+            redirect = "/";
+        }
+
+        if (redirect === this.props.history.location.pathname)
+            return null;
+
+        return (<Grid>
+            <Redirect to={redirect} />
+        </Grid>);
+    }
+
+    renderAnonymous() {
         return <Grid className="omb_login">
-            <h3 className="omb_authTitle">Login of <Link to={'/Register'}>Registreer</Link></h3>
+            {head()}
+            <h2 className="omb_authTitle">Login or <Link to={'/Register'}>Register</Link></h2>
             <Row className="omb_socialButtons">
                 <Col xs={4} sm={2} smOffset={3} >
                     <Link to="#" className="btn btn-lg btn-block omb_btn-facebook">
@@ -79,51 +94,53 @@ class Login extends React.Component<LoginProps, LoginState> {
             <Row className="omb_loginOr">
                 <Col xs={12} sm={6} smOffset={3} >
                     <hr className="omb_hrOr" />
-                    <span className="omb_spanOr">of</span>
-			    </Col>
+                    <span className="omb_spanOr">or</span>
+                </Col>
             </Row>
 
             <Row>
                 <Col xs={12} sm={6} smOffset={3} >
-                    <Form className="omb_loginForm" onSubmit={this.login} autoComplete="off">
+                    <Form className="omb_loginForm" onSubmit={(e) => this.login(e)} autoComplete="off">
                         <FormGroup validationState={this.getValidationState()}>
                             <InputGroup>
                                 <InputGroup.Addon><i className="fa fa-user" /></InputGroup.Addon>
-                                <FormControl name="userName" type="text" onChange={this.handleChange} placeholder="Login Naam" />
+                                <FormControl name="email" type="text" onChange={(e) => this.handleChange(e)} placeholder="Email" />
                             </InputGroup>
                             <FormControl.Feedback />
                         </FormGroup>
 
-                        <FormGroup>
+                        <FormGroup validationState={this.props.loginError ? "error" : null}>
                             <InputGroup>
                                 <InputGroup.Addon><i className="fa fa-lock" /></InputGroup.Addon>
-                                <FormControl name="password" type="password" onChange={this.handleChange} placeholder="Password" />
+                                <FormControl name="password" type="password" onChange={(e) => this.handleChange(e)} placeholder="Password" />
                             </InputGroup>
-                            <FormControl.Feedback />
+                            <HelpBlock>{this.props.loginError}</HelpBlock>
                         </FormGroup>
 
-                        <Button className="btn btn-lg btn-primary btn-block" type="submit">Inloggen</Button>
-    				</Form>
+                        <Button className="btn btn-lg btn-primary btn-block" type="submit">Login</Button>
+                    </Form>
                 </Col>
             </Row>
 
             <Row>
-                <Col xs={12} sm={3} smOffset={3}>
-                    <FormGroup>
-                        <Checkbox>Onthou mij</Checkbox>
-                    </FormGroup>
-    			</Col>
-                <Col xs={12} sm={3}>
-                    <p className="omb_forgotPwd">
-                        <Link to="#">Password vergeten?</Link>
-                    </p>
+                <Col xs={12} sm={6} smOffset={3} >
+                    <Row>
+                        <Col sm={6}>
+                            <Checkbox>Remember me</Checkbox>
+                        </Col>
+                        <Col sm={6} className="omb_forgotPwd">
+                            <div className="pull-right">
+                                <Link to="#">Forgot Password?</Link>
+                            </div>
+                        </Col>
+                    </Row>
                 </Col>
-            </Row>	    
+            </Row>
         </Grid>
     }
 
     public render() {
-        if (this.props.authenticated)
+        if (this.props.loggedin)
             return this.renderLoggedIn();
         else
             return this.renderAnonymous();

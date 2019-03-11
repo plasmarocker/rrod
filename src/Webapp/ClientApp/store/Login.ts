@@ -1,133 +1,140 @@
 ﻿import { fetch } from 'domain-task';
-import { Action, Reducer, ActionCreator } from 'redux';
+import { Action, Reducer } from 'redux';
+import { LoginModel } from '../server/LoginModel';
 import { AppThunkAction } from './';
-import { LoginInputModel } from '../server/LoginInputModel';
-import { browserHistory } from 'react-router';
-import { actionCreators as userActionCreators, GetUserReceivedAction, GetUserRequestAction, UserModel }  from './User';
-import { LogoutInputModel } from '../server/LogoutInputModel';
+import * as Cookies from 'js-cookie';
+import { actionCreators as XsrfActionCreators } from './Xsrf';
+import { push } from 'react-router-redux';
+import { ApiModel } from 'ClientApp/server/ApiModel';
 
-export const LOGIN_REQUEST = 'LoginRequestAction';
-export const LOGIN_SUCCESS = 'LoginSuccessAction';
-export const LOGIN_INVALID = 'LoginInvalidAction';
-export const LOGIN_ERROR = 'LoginErrorAction';
-export const LOGOUT_REQUEST = 'LogoutRequestAction';
-export const LOGOUT_SUCCESS = 'LogoutSuccessAction';
-export const LOGOUT_ERROR = 'LogoutErrorAction';
+// -----------------
+// STATE - This defines the type of data maintained in the Redux store.
 
 export interface LoginState {
-    authenticating: boolean;
-    authenticated: boolean;
+    loggedin: boolean;
+    userId?: string;
+    loginError?: string;
+    userName?: string;
+    imageUrl?: string;
 }
 
-const DefaultLoginState: LoginState = {
-    authenticating: false,
-    authenticated: false
-}
+// -----------------
+// ACTIONS - These are serializable (hence replayable) descriptions of state transitions.
+// They do not themselves have any side-effects; they just describe something that is going to happen.
+// Use @typeName and isActionType for type detection that works even after serialization/deserialization.
 
-interface LoginRequestAction {
-    type: 'LoginRequestAction';
-}
+export const LOGIN_SUCCESS = 'LOGIN_SUCCESS';
+export const LOGOUT_SUCCESS = 'LOGOUT_SUCCESS';
 
-interface LoginErrorAction {
-    type: 'LoginErrorAction';
-}
+interface StartLoginAction      { type: 'START_LOGIN' }
+interface LoginSuccessAction    { type: 'LOGIN_SUCCESS' }
+interface LoginFailedAction     { type: 'LOGIN_FAILED', payload: { error: string }  }
+interface StartLogoutAction     { type: 'START_LOGOUT' }
+interface LogoutSuccessAction   { type: 'LOGOUT_SUCCESS' }
+interface LogoutFailedAction    { type: 'LOGOUT_FAILED' }
 
-export interface LoginSuccessAction {
-    type: 'LoginSuccessAction';
-}
 
-interface LoginInvalidAction {
-    type: 'LoginInvalidAction';
-}
+// Declare a 'discriminated union' type. This guarantees that all references to 'type' properties contain one of the
+// declared type strings (and not any other arbitrary string).
+type KnownAction = | StartLoginAction | LoginSuccessAction | LoginFailedAction | StartLogoutAction | LogoutSuccessAction | LogoutFailedAction;
 
-interface LogoutErrorAction {
-    type: 'LogoutErrorAction';
-}
-
-interface AuthenticatedAction {
-    type: 'AuthenticatedAction';
-    idToken: any;
-    authToken: string;
-}
-
-interface LogoutRequestAction {
-    type: 'LogoutRequestAction';
-}
-
-interface LogoutSuccessAction {
-    type: 'LogoutSuccessAction';
-}
-
-// TODO import Success and Invalid actions from server and handle them
-type KnownAction = LoginRequestAction | LoginErrorAction | LoginSuccessAction | LoginInvalidAction | LogoutRequestAction | LogoutErrorAction | LogoutSuccessAction;
+// ----------------
+// ACTION CREATORS - These are functions exposed to UI components that will trigger a state transition.
+// They don't directly mutate state, but they can have external side-effects (such as loading data).
 
 export const actionCreators = {
+    // login: () => <LoginAction>{ type: 'START_LOGIN' },
+    login: (loginInput: LoginModel) => (dispatch, getState) => {
 
-    login: (loginInput: LoginInputModel): AppThunkAction<KnownAction> => async (dispatch, getState) => {
-        dispatch({ type: LOGIN_REQUEST });
+        return (async () => {
+            dispatch({ type: 'START_LOGIN' });
 
-        var xsrf = getState().session.xsrfToken;
-        let response = <Response>await fetch('/account/login', {
-            method: 'POST',
-            credentials: 'include',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-XSRF-TOKEN': xsrf
-            },
-            body: JSON.stringify(loginInput)
-        });
+            try {
 
-        if (response.ok) {
-            dispatch({ type: LOGIN_SUCCESS });
-            dispatch(userActionCreators.getUser() as any);
-            browserHistory.push('/');
-        } else {
-            // TODO: display error
-            dispatch({ type: LOGIN_ERROR });
-        }
-    },
-    logout: (): AppThunkAction<KnownAction> => async (dispatch, getState) => {
-        dispatch({ type: LOGIN_REQUEST });
+                const xsrf = getState().xsrf.token;
+                const response = <Response>await fetch('/account/login', {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: new Headers({
+                        'Content-Type': 'application/json',
+                        'X-XSRF-TOKEN': xsrf
+                    }),
+                    body: JSON.stringify(loginInput)
+                });
 
-        var xsrf = getState().session.xsrfToken;
-        let response = <Response>await fetch('/account/logout', {
-            method: 'POST',
-            credentials: 'include',
-            headers: {
-                'X-XSRF-TOKEN': xsrf
+                if (response.ok) {
+                    // Get updated xsrf token
+                    dispatch(XsrfActionCreators.refresh());
+                    // Get updated menu; we may get extra options based on our role
+                    // dispatch(NavMenuActionCreators.fetchMenu());
+                    // will redirect
+                    dispatch({ type: 'LOGIN_SUCCESS' });
+
+                    dispatch(push(loginInput.returnUrl || '/'));
+                } else {
+                    const model: ApiModel<LoginModel> = await response.json();
+                    dispatch({ type: 'LOGIN_FAILED', payload: { error: model.result.message || "Login failed" } });
+                }
             }
-        });
+            catch (e) {
+                dispatch({ type: 'LOGIN_FAILED', payload: { error: e.message || "Login error" } });
+            }
+        })();
+    },
+    logout: () => (dispatch, getState) => {
+        return (async () => {
+            dispatch({ type: 'START_LOGOUT' });
 
-        if (response.ok) {
-            dispatch({ type: LOGOUT_SUCCESS });
-            browserHistory.push('/');
-        } else {
-            dispatch({ type: LOGOUT_ERROR });
-        }
+            var xsrf = getState().xsrf.token;
+            let response = <Response>await fetch('/account/logout', {
+                method: 'POST',
+                credentials: 'include',
+                headers: new Headers({
+                    'X-XSRF-TOKEN': xsrf
+                })
+            });
+
+            if (response.ok) {
+                // Get updated xsrf token
+                dispatch(XsrfActionCreators.refresh());
+                // Get updated menu; we may get extra options based on our role
+                // dispatch(NavMenuActionCreators.fetchMenu());
+                // dispatch(push('/'));
+                dispatch({ type: 'LOGOUT_SUCCESS' });
+
+                dispatch(push('/'));
+
+            } else {
+                dispatch({ type: 'LOGOUT_FAILED' });
+            }
+        })();
     }
-
 };
 
+// ----------------
+// REDUCER - For a given state and action, returns the new state. To support time travel, this must not mutate the old state.
 
 export const reducer: Reducer<LoginState> = (state: LoginState, action: KnownAction) => {
     switch (action.type) {
-        case LOGIN_REQUEST:
-            return { authenticating: true, authenticated: false };
-        case LOGIN_ERROR:
-            return { authenticating: false, authenticated: false };
-        case LOGIN_SUCCESS:
-            return { authenticating: false, authenticated: true };
-        case LOGIN_INVALID:
-            return { authenticating: false, authenticated: false };
-        case LOGOUT_REQUEST:
-            return { authenticating: true, authenticated: true };
-        case LOGOUT_ERROR:
-            return { authenticating: false, authenticated: true };
-        case LOGOUT_SUCCESS:
-            return { authenticating: false, authenticated: false };
+        case 'START_LOGIN':
+            return { loggedin: false };
+        case 'LOGIN_SUCCESS':
+            return { loggedin: true };
+        case 'LOGIN_FAILED':
+            return { ...state, loggedIn: false, loginError: action.payload.error };
+        case 'START_LOGOUT':
+            return { loggedin: true };
+        case 'LOGOUT_SUCCESS':
+            return { loggedin: false };
+        case 'LOGOUT_FAILED':
+            return { loggedin: true };
+
         default:
+            // The following line guarantees that every action in the KnownAction union has been covered by a case above
             const exhaustiveCheck: never = action;
     }
 
-    return state || DefaultLoginState;
+    // For unrecognized actions (or in cases where actions have no effect), must return the existing state
+    //  (or default initial state if none was supplied)
+    return state || { loggedin: false };
 };

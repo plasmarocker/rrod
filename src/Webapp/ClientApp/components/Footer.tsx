@@ -1,43 +1,39 @@
 import * as React from 'react';
 import { connect } from 'react-redux';
-import { autobind } from 'core-decorators';
 import { Button, FormGroup, Form, ControlLabel, FormControl, HelpBlock } from 'react-bootstrap';
 import { ApplicationState } from '../store';
 import * as FooterState from '../store/Footer';
+import { SubscribeModel } from '../server/Subscribe'
 
 
-type FooterProps = FooterState.FooterState & typeof FooterState.actionCreators;
+type FooterProps = FooterState.FooterState & { xsrfToken: string } & typeof FooterState.actionCreators;
 
-class Footer extends React.Component<FooterProps, FooterState.EmailForm> {
+class Footer extends React.Component<FooterProps, SubscribeModel> {
 
-    constructor() {
-        super();
+    constructor(props: FooterProps) {
+        super(props);
         this.state = {
             email: ''
         };
         this.handleChange = this.handleChange.bind(this);
     }
 
-    @autobind
-    getValidationState(): "success" | "warning" | "error" {
+    getValidationState = (): "success" | "warning" | "error" => {
         var emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
         return emailRegex.test(this.state.email) ? "success" : null;
     }
 
-    @autobind
-    handleChange(e: any) {
+    handleChange = (e: any) => {
         this.setState({ email: e.target.value });
     }
 
-    @autobind
-    submitEmail(event : React.FormEvent<Form>) {
+    submitEmail = (event : React.FormEvent<Form>) => {
         this.props.submitEmail(this.state);
         event.preventDefault();
     }
 
-    @autobind
-    submitDisabled() {
-        return this.props.isSubmitting || this.getValidationState() !== "success";
+    submitDisabled = () => {
+        return this.props.isSubmitting || this.getValidationState() === "error";
     }
 
     public render() {
@@ -57,13 +53,16 @@ class Footer extends React.Component<FooterProps, FooterState.EmailForm> {
                     ?
                         <div className="subscription-message">{this.props.message}</div>
                     :
-                        <Form inline onSubmit={this.submitEmail}>
+                    <Form inline method="post" action="/subscribe" onSubmit={this.submitEmail}>
+                        <input type="hidden" name="requestVerificationToken" defaultValue={this.props.xsrfToken} />
+
                         <FormGroup
                             controlId="formBasicText"
                             validationState={this.getValidationState()}
                             >
                             <FormControl
                                 type="text"
+                                name="email"
                                 value={ this.state.email }
                                 placeholder="Enter your email address"
                                 onChange={ this.handleChange }
@@ -91,6 +90,8 @@ class Footer extends React.Component<FooterProps, FooterState.EmailForm> {
 }
 
 export default connect(
-    (state: ApplicationState) => state.footer, // Selects which state properties are merged into the component's props
-    FooterState.actionCreators                 // Selects which action creators are merged into the component's props
+    (state: ApplicationState) => {
+        return { ...state.footer, xsrfToken: state.xsrf.token }
+    }, 
+    FooterState.actionCreators                 
 )(Footer);

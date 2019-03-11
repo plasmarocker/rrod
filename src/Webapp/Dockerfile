@@ -1,17 +1,20 @@
-FROM microsoft/dotnet:latest
+FROM microsoft/dotnet:2.1-sdk-alpine AS build
+RUN apk add --update nodejs nodejs-npm
 
-RUN apt-get update
-RUN wget -qO- https://deb.nodesource.com/setup_4.x | bash -
-RUN apt-get install -y build-essential nodejs
+FROM build AS publish
+WORKDIR /build
+COPY . .
+WORKDIR /build/src/Webapp
+RUN dotnet publish -c Release -o /app
+
+FROM microsoft/dotnet:2.1-aspnetcore-runtime-alpine AS base
+RUN apk add --update nodejs
 
 WORKDIR /app
+EXPOSE 443 80
 
-COPY project.json .
-RUN ["dotnet", "restore"]
-
-COPY . /app
-RUN ["dotnet", "build"]
-
-EXPOSE 5000/tcp
-
-ENTRYPOINT ["dotnet", "run", "--urls", "http://0.0.0.0:5000"]
+FROM base AS final
+ENV ASPNETCORE_ENVIRONMENT Production
+WORKDIR /app
+COPY --from=publish /app .
+ENTRYPOINT ["dotnet", "Webapp.dll"]

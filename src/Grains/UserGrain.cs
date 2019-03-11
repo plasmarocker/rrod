@@ -6,6 +6,7 @@ using Grains.Redux;
 using System.Reactive.Linq;
 using Orleans.Streams;
 using Grains.Utility;
+using Microsoft.Extensions.Logging;
 
 namespace Grains
 {
@@ -15,12 +16,14 @@ namespace Grains
         IDisposable storeSubscription;
         StreamSubscriptionHandle<IAction> actionStreamSubscription;
 
-        public UserGrain(ReduxTableStorage<UserState> storage) : base(UserState.Reducer, storage)
+        public UserGrain(ReduxTableStorage<UserState> storage, ILoggerFactory loggerFactory) : base(UserState.Reducer, storage, loggerFactory)
         {
         }
 
         public override async Task OnActivateAsync()
         {
+            await base.OnActivateAsync();
+
             // Publish all user state updates to a stream that other grains can subscribe to
             this.streamProvider = this.GetStreamProvider("Default");
             Guid userGuid = GuidUtility.Create(GuidUtility.UrlNamespace, this.GetPrimaryKeyString());
@@ -35,7 +38,6 @@ namespace Grains
             actionStreamSubscription = await actionStream.SubscribeAsync(async (action, st) => {
                 await this.Dispatch(action);
             });
-            await base.OnActivateAsync();
         }
 
 
@@ -44,7 +46,7 @@ namespace Grains
         {
             base.Dispatch(action);
             if (delaySave)
-                return TaskDone.Done;
+                return Task.CompletedTask;
             else
                 return this.WriteStateAsync();
         }

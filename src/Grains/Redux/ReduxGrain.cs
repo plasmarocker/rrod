@@ -4,6 +4,8 @@ using System.Linq;
 using System.Reactive.Linq;
 using System.Threading.Tasks;
 using GrainInterfaces;
+using Microsoft.WindowsAzure.Storage;
+using Microsoft.Extensions.Logging;
 
 namespace Grains.Redux
 {
@@ -13,12 +15,14 @@ namespace Grains.Redux
 
         private readonly Reducer<TState> reducer;
         private readonly ReduxTableStorage<TState> storage;
+        private readonly ILogger logger;
         private string tableKey;
 
-        public ReduxGrain(Reducer<TState> reducer, ReduxTableStorage<TState> storage)
+        public ReduxGrain(Reducer<TState> reducer, ReduxTableStorage<TState> storage, ILoggerFactory loggerFactory)
         {
             this.reducer = reducer;
             this.storage = storage;
+            this.logger = loggerFactory.CreateLogger<ReduxGrain<TState>>();
         }
 
         public override Task OnActivateAsync()
@@ -42,7 +46,7 @@ namespace Grains.Redux
         public async Task WriteStateAsync()
         {
             var actionList = Store.GetState().UnsavedActions;
-            await storage.WriteAsync(this.tableKey, actionList, this.GetLogger());
+            await storage.WriteAsync(this.tableKey, actionList, this.logger);
             Store.GetState().UnsavedActions.Clear();
         }
 
@@ -50,13 +54,21 @@ namespace Grains.Redux
         private async Task ReadStateAsync()
         {
             var state = Tuple.Create<TState, uint>(null, 0);
-            var storageActonObservable = storage.ReadObservable(this.tableKey, this.GetLogger());
-            state = await storageActonObservable.Aggregate(state, (s, a) => 
-                {
-                    s = Tuple.Create(this.reducer(s.Item1, a.Action), a.Serial);
-                    return s;
-                });
-            this.Store = new ReduxGrainStore<TState>(this.reducer, state.Item1, state.Item2);
+            try
+            {
+                var storageActonObservable = storage.ReadObservable(this.tableKey, this.logger);
+                state = await storageActonObservable.Aggregate(state, (s, a) =>
+                    {
+                        s = Tuple.Create(this.reducer(s.Item1, a.Action), a.Serial);
+                        return s;
+                    });
+                this.Store = new ReduxGrainStore<TState>(this.reducer, state.Item1, state.Item2);
+            }
+            catch (Exception e)
+            {
+                // Can't connect to table storage server. Throw a serializable exception
+                throw new Exception("Can't connect to table storage service: " + e.Message);
+            }
         }
 
         public Task<IAction> Dispatch(IAction action)

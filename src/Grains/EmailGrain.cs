@@ -9,41 +9,30 @@ using System.IO;
 using System.Threading.Tasks;
 using MimeKit;
 using MailKit.Net.Smtp;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Configuration;
 
 namespace Grains
 {
-    public class ConnectionStrings
-    {
-        public string DataConnectionString { get; set; }
-        public string ReduxConnectionString { get; set; }
-        public string SmtpConnectionString { get; set; }
-    }
-
-
     [StatelessWorker]
     public class EmailGrain : Grain, IEmailGrain
     {
-        SmtpConnectionString _smtpSettings;
-        Logger _logger;
+        readonly SmtpConnectionString smtpSettings;
+        readonly ILogger<EmailGrain> logger;
 
-        public EmailGrain(IOptions<ConnectionStrings> connectionStrings)
+        public EmailGrain(IConfiguration config, ILogger<EmailGrain> logger)
         {
-            _smtpSettings = new SmtpConnectionString()
+            this.smtpSettings = new SmtpConnectionString()
             {
-                ConnectionString = connectionStrings.Value.SmtpConnectionString
+                ConnectionString = config.GetConnectionString("SmtpConnectionString")
             };
-        }
-
-        public override Task OnActivateAsync()
-        {
-            _logger = this.GetLogger();
-            return base.OnActivateAsync();
+            this.logger = logger;
         }
 
         public Task SendEmail(Email email)
         {
             var message = new MimeMessage ();
-            message.From.Add (new MailboxAddress (_smtpSettings.FromDisplayName, _smtpSettings.FromAddress));
+            message.From.Add (new MailboxAddress (smtpSettings.FromDisplayName, smtpSettings.FromAddress));
             email.To.ForEach(address => message.To.Add(MailboxAddress.Parse(address)));
             message.Subject = email.Subject.Replace('\r', ' ').Replace('\n', ' ');
             var body = new TextPart("html") { Text = email.MessageBody };
@@ -55,7 +44,7 @@ namespace Grains
                 };
                 email.Attachments.ForEach(attachment => {
                     multipart.Add(new MimePart (attachment.MimeType) {
-                        ContentObject = new ContentObject (new MemoryStream(attachment.Data), ContentEncoding.Default),
+                        Content = new MimeContent (new MemoryStream(attachment.Data), ContentEncoding.Default),
                         ContentDisposition = new ContentDisposition (ContentDisposition.Attachment),
                         ContentTransferEncoding = ContentEncoding.Base64,
                         FileName = attachment.Name
@@ -68,7 +57,7 @@ namespace Grains
                 message.Body = body;
             }
 
-            Task.Run(async () =>
+            Task.Run(() =>
             {
                 try
                 {
@@ -77,14 +66,14 @@ namespace Grains
                         // For demo-purposes, accept all SSL certificates (in case the server supports STARTTLS)
                         client.ServerCertificateValidationCallback = (s,c,h,e) => true;
 
-                        client.Connect (_smtpSettings.Host, _smtpSettings.Port, false);
+                        client.Connect (smtpSettings.Host, smtpSettings.Port, false);
 
                         // Note: since we don't have an OAuth2 token, disable
                         // the XOAUTH2 authentication mechanism.
                         client.AuthenticationMechanisms.Remove ("XOAUTH2");
 
                         // Note: only needed if the SMTP server requires authentication
-                        client.Authenticate (_smtpSettings.UserName, _smtpSettings.Password);
+                        client.Authenticate (smtpSettings.UserName, smtpSettings.Password);
 
                         client.Send (message);
                         client.Disconnect (true);
@@ -92,12 +81,11 @@ namespace Grains
                 }
                 catch (Exception e)
                 {
-                    this._logger.Error(1002, "Error sending email", e);
+                    this.logger.LogError(e, "EmailGrain: Error sending email");
                 }
-                await Task.FromResult(0);
             });
 
-            return Task.FromResult(0);
+            return Task.CompletedTask;
         }
     }
 
@@ -161,7 +149,7 @@ namespace Grains
 
         public string FromAddress
         {
-            get => this.TryGetValue("FromAddress", out object fromAddress) ? fromAddress.ToString() : "maarten@sikkema.com";
+            get => this.TryGetValue("FromAddress", out object fromAddress) ? fromAddress.ToString() : "rrod@example.com";
             set
             {
                 this["FromAddress"] = value;
